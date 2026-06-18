@@ -562,7 +562,7 @@ def componente_voz():
         estado.textContent = "Dijiste: " + texto;
         // Buscar el input de texto de Streamlit en la página padre y rellenarlo
         try {
-          const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+          const inputs = window.parent.document.querySelectorAll('input[type=text]');
           if(inputs.length){
             const campo = inputs[inputs.length-1];
             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
@@ -572,7 +572,7 @@ def componente_voz():
             estado.textContent = "Te escuché, pero escríbelo abajo y pulsa Enviar.";
           }
         } catch(err){
-          estado.textContent = "Te escuché: \"" + texto + "\". Escríbelo abajo y pulsa Enviar.";
+          estado.textContent = "Te escuché. Escríbelo abajo y pulsa Enviar a ROBI.";
         }
       };
 
