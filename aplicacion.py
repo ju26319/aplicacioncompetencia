@@ -20,8 +20,8 @@ import anthropic
 # ----------------------------------------------------------------------------
 st.set_page_config(page_title="Raíces de Paz IA", page_icon="🌿", layout="centered")
 
-MODELO_TEXTO = "claude-haiku-4-5"      # chatbot y robot (texto)
-MODELO_VISION = "claude-sonnet-4-5"    # mapa (análisis de imagen)
+MODELO_TEXTO = "claude-haiku-4-5-20251001"   # chatbot y robot (texto) — string versionado
+MODELO_VISION = "claude-sonnet-4-6"          # mapa (análisis de imagen) — modelo vigente
 
 # Catálogo de destinos reales de Colombia (compartido por chatbot y robot)
 SITIOS = [
@@ -510,26 +510,63 @@ def componente_voz():
     const btn = document.getElementById('btnHablar');
     const estado = document.getElementById('estado');
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    // Diagnóstico 1: la Web Speech API SOLO funciona en https o localhost.
+    const esSeguro = window.isSecureContext ||
+                     location.protocol === 'https:' ||
+                     location.hostname === 'localhost';
+
     if(!SR){
       estado.textContent = "Tu navegador no soporta reconocimiento de voz. Usa Chrome o Edge.";
+      btn.disabled = true;
+    } else if(!esSeguro){
+      estado.textContent = "El micrófono necesita HTTPS. Funcionará al desplegar en la nube.";
       btn.disabled = true;
     } else {
       const rec = new SR();
       rec.lang = 'es-ES'; rec.interimResults = false; rec.maxAlternatives = 1;
-      btn.onclick = () => { estado.textContent = "Escuchando…"; rec.start(); };
+
+      btn.onclick = async () => {
+        // Diagnóstico 2: pedir permiso de micrófono explícitamente antes de arrancar.
+        try {
+          if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
+            await navigator.mediaDevices.getUserMedia({audio:true});
+          }
+          estado.textContent = "Escuchando…";
+          rec.start();
+        } catch(err){
+          estado.textContent = "Permiso de micrófono denegado. Actívalo en el candado 🔒 del navegador.";
+        }
+      };
+
       rec.onresult = (e) => {
         const texto = e.results[0][0].transcript;
         estado.textContent = "Dijiste: " + texto;
         // Buscar el input de texto de Streamlit en la página padre y rellenarlo
-        const inputs = window.parent.document.querySelectorAll('input[type="text"]');
-        if(inputs.length){
-          const campo = inputs[inputs.length-1];
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-          setter.call(campo, texto);
-          campo.dispatchEvent(new Event('input', {bubbles:true}));
+        try {
+          const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+          if(inputs.length){
+            const campo = inputs[inputs.length-1];
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+            setter.call(campo, texto);
+            campo.dispatchEvent(new Event('input', {bubbles:true}));
+          } else {
+            estado.textContent = "Te escuché, pero escríbelo abajo y pulsa Enviar.";
+          }
+        } catch(err){
+          estado.textContent = "Te escuché: \"" + texto + "\". Escríbelo abajo y pulsa Enviar.";
         }
       };
-      rec.onerror = (e) => { estado.textContent = "Error: " + e.error; };
+
+      rec.onerror = (e) => {
+        const msg = {
+          'not-allowed': "Permiso de micrófono denegado. Actívalo en el candado 🔒.",
+          'no-speech': "No te escuché. Inténtalo de nuevo.",
+          'audio-capture': "No se detecta micrófono.",
+          'network': "Error de red en el reconocimiento."
+        }[e.error] || ("Error: " + e.error);
+        estado.textContent = msg;
+      };
       rec.onend = () => { if(estado.textContent==="Escuchando…") estado.textContent="Listo"; };
     }
     </script>
