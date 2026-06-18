@@ -577,17 +577,29 @@ def componente_voz():
             // Quitar el foco fuerza a Streamlit a confirmar el valor
             campo.blur();
 
-            // Buscar el botón "Enviar a ROBI" y hacer clic automático tras un breve respiro,
-            // para que ROBI conteste sin que el usuario toque nada más.
-            setTimeout(() => {
+            // Buscar el botón "Enviar a ROBI" y hacer clic automático.
+            // Reintenta varias veces por si Streamlit aún no lo renderizó,
+            // y busca el texto en todo el contenido del botón (textContent), no solo innerText.
+            let intentos = 0;
+            const buscarYClic = () => {
+              intentos++;
               const botones = doc.querySelectorAll('button');
               for (const b of botones){
-                if (b.innerText && b.innerText.trim().includes('Enviar a ROBI')){
+                const t = (b.textContent || "").trim();
+                if (t.includes('Enviar a ROBI')){
                   b.click();
-                  break;
+                  estado.textContent = "Dijiste: " + texto + " — ROBI está pensando…";
+                  return true;
                 }
               }
-            }, 600);
+              if (intentos < 8){
+                setTimeout(buscarYClic, 400);
+              } else {
+                estado.textContent = "Te escuché. Pulsa 'Enviar a ROBI' para continuar.";
+              }
+              return false;
+            };
+            setTimeout(buscarYClic, 500);
           } else {
             estado.textContent = "Te escuché, pero escríbelo abajo y pulsa Enviar.";
           }
