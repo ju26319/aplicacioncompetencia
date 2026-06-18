@@ -460,15 +460,10 @@ def pantalla_robot():
             "Usa Chrome o Edge. Si la voz falla, escribe abajo como respaldo.")
 
     # --- Componente de voz en el navegador (reconocimiento + síntesis) ---
-    # Captura la voz, la transcribe con Web Speech, y rellena el campo de texto de Streamlit.
+    # Captura la voz, la transcribe y recarga la página con el texto en la URL (?msg=...).
     componente_voz()
 
-    # Limpiar el input de forma segura ANTES de instanciar el widget
-    if st.session_state.get("_limpiar_robot_input"):
-        st.session_state.robot_input = ""
-        st.session_state._limpiar_robot_input = False
-
-    # Campo de respaldo / receptor del texto transcrito
+    # Campo de respaldo / escritura manual
     texto = st.text_input("Tu mensaje (se llena solo al hablar, o escríbelo):", key="robot_input")
     enviar = st.button("Enviar a ROBI")
 
@@ -477,13 +472,20 @@ def pantalla_robot():
         with st.chat_message("user" if m["role"] == "user" else "assistant"):
             st.write(m["content"])
 
-    # Leer el mensaje desde el widget o desde session_state (respaldo por si el
-    # valor lo inyectó el componente de voz).
-    mensaje_actual = (texto or st.session_state.get("robot_input", "")).strip()
+    # Determinar el mensaje a enviar: primero por voz (query param ?msg=), luego escrito.
+    mensaje = None
+    msg_voz = st.query_params.get("msg", "")
+    if msg_voz and msg_voz != st.session_state.get("_ultimo_msg_voz", ""):
+        mensaje = msg_voz.strip()
+        st.session_state._ultimo_msg_voz = msg_voz   # evita reprocesar al recargar
+        st.query_params.clear()                       # limpia la URL
+    elif enviar and texto.strip():
+        mensaje = texto.strip()
 
-    if enviar and mensaje_actual:
-        mensaje = mensaje_actual
+    if mensaje:
         st.session_state.robot_hist.append({"role": "user", "content": mensaje})
+        with st.chat_message("user"):
+            st.write(mensaje)
         with st.spinner("ROBI está pensando…"):
             try:
                 salida, _ = conversar_con_maps(
@@ -493,11 +495,10 @@ def pantalla_robot():
             except Exception as e:
                 salida = f"Hubo un error al conectar: {e}"
         st.session_state.robot_hist.append({"role": "assistant", "content": salida})
-        # Marcar para limpiar el campo en el próximo run (evita excepción de Streamlit)
-        st.session_state._limpiar_robot_input = True
+        with st.chat_message("assistant"):
+            st.write(salida)
         # Hacer que el navegador lea la respuesta en voz alta
         hablar_en_navegador(salida)
-        st.rerun()
 
 
 def componente_voz():
@@ -563,48 +564,15 @@ def componente_voz():
 
       rec.onresult = (e) => {
         const texto = e.results[0][0].transcript;
-        estado.textContent = "Dijiste: " + texto + " — enviando…";
+        estado.textContent = "Dijiste: " + texto + " — enviando a ROBI…";
         try {
-          const doc = window.parent.document;
-          const campos = doc.querySelectorAll('input[type=text]');
-          if(campos.length){
-            const campo = campos[campos.length-1];
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
-            setter.call(campo, texto);
-            // Disparar los eventos que Streamlit escucha para registrar el valor
-            campo.dispatchEvent(new Event('input', {bubbles:true}));
-            campo.dispatchEvent(new Event('change', {bubbles:true}));
-            // Quitar el foco fuerza a Streamlit a confirmar el valor
-            campo.blur();
-
-            // Buscar el botón "Enviar a ROBI" y hacer clic automático.
-            // Reintenta varias veces por si Streamlit aún no lo renderizó,
-            // y busca el texto en todo el contenido del botón (textContent), no solo innerText.
-            let intentos = 0;
-            const buscarYClic = () => {
-              intentos++;
-              const botones = doc.querySelectorAll('button');
-              for (const b of botones){
-                const t = (b.textContent || "").trim();
-                if (t.includes('Enviar a ROBI')){
-                  b.click();
-                  estado.textContent = "Dijiste: " + texto + " — ROBI está pensando…";
-                  return true;
-                }
-              }
-              if (intentos < 8){
-                setTimeout(buscarYClic, 400);
-              } else {
-                estado.textContent = "Te escuché. Pulsa 'Enviar a ROBI' para continuar.";
-              }
-              return false;
-            };
-            setTimeout(buscarYClic, 500);
-          } else {
-            estado.textContent = "Te escuché, pero escríbelo abajo y pulsa Enviar.";
-          }
+          // Enviar el texto a Streamlit recargando la página padre con ?msg=...
+          // Es el método robusto: Streamlit lee query params de forma nativa.
+          const url = new URL(window.parent.location.href);
+          url.searchParams.set('msg', texto);
+          window.parent.location.href = url.toString();
         } catch(err){
-          estado.textContent = "Te escuché. Escríbelo abajo y pulsa Enviar a ROBI.";
+          estado.textContent = "Te escuché, pero escríbelo abajo y pulsa Enviar a ROBI.";
         }
       };
 
