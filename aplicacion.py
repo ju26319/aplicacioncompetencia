@@ -507,9 +507,27 @@ def componente_voz():
       <div id="estado" style="font-size:.85rem;color:#6b7681;margin-top:6px">Listo</div>
     </div>
     <script>
+    console.log("[ROBI-voz] componente cargado");
     const btn = document.getElementById('btnHablar');
     const estado = document.getElementById('estado');
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    // FIX IFRAME: este componente vive dentro de un <iframe> de Streamlit que
+    // por defecto NO tiene permiso de micrófono. Intentamos añadirle allow="microphone"
+    // localizando nuestro propio iframe desde la ventana padre.
+    try {
+      const iframes = window.parent.document.querySelectorAll('iframe');
+      for (const f of iframes) {
+        try {
+          if (f.contentWindow === window) {
+            f.setAttribute('allow', 'microphone; autoplay');
+            console.log("[ROBI-voz] permiso de micrófono añadido al iframe");
+          }
+        } catch(e) {}
+      }
+    } catch(e) {
+      console.log("[ROBI-voz] no se pudo acceder al iframe padre:", e);
+    }
 
     // Diagnóstico 1: la Web Speech API SOLO funciona en https o localhost.
     const esSeguro = window.isSecureContext ||
