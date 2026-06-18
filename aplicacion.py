@@ -594,13 +594,13 @@ def componente_voz():
 
 def hablar_en_navegador(texto):
     """Hace que el navegador lea el texto en voz alta con Web Speech (síntesis)."""
-    # Escapar para insertarlo dentro de un literal JS con comillas dobles
-    seguro = (texto.replace("\\", "\\\\").replace('"', '\\"')
-              .replace("\n", " ").replace("`", "'"))
+    # json.dumps escapa correctamente comillas, saltos de línea, backslashes y
+    # unicode, produciendo un literal JS válido. Evita el SyntaxError del escapado manual.
+    texto_js = json.dumps(texto)
     html = f"""
     <script>
     function hablar() {{
-      const u = new SpeechSynthesisUtterance("{seguro}");
+      const u = new SpeechSynthesisUtterance({texto_js});
       u.lang = 'es-ES'; u.rate = 1; u.pitch = 1;
       const voces = window.speechSynthesis.getVoices().filter(v => v.lang.startsWith('es'));
       if(voces.length) u.voice = voces[0];
