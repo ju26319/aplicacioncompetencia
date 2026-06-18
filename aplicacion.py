@@ -477,8 +477,12 @@ def pantalla_robot():
         with st.chat_message("user" if m["role"] == "user" else "assistant"):
             st.write(m["content"])
 
-    if enviar and texto.strip():
-        mensaje = texto.strip()
+    # Leer el mensaje desde el widget o desde session_state (respaldo por si el
+    # valor lo inyectó el componente de voz).
+    mensaje_actual = (texto or st.session_state.get("robot_input", "")).strip()
+
+    if enviar and mensaje_actual:
+        mensaje = mensaje_actual
         st.session_state.robot_hist.append({"role": "user", "content": mensaje})
         with st.spinner("ROBI está pensando…"):
             try:
@@ -559,15 +563,31 @@ def componente_voz():
 
       rec.onresult = (e) => {
         const texto = e.results[0][0].transcript;
-        estado.textContent = "Dijiste: " + texto;
-        // Buscar el input de texto de Streamlit en la página padre y rellenarlo
+        estado.textContent = "Dijiste: " + texto + " — enviando…";
         try {
-          const inputs = window.parent.document.querySelectorAll('input[type=text]');
-          if(inputs.length){
-            const campo = inputs[inputs.length-1];
+          const doc = window.parent.document;
+          const campos = doc.querySelectorAll('input[type=text]');
+          if(campos.length){
+            const campo = campos[campos.length-1];
             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
             setter.call(campo, texto);
+            // Disparar los eventos que Streamlit escucha para registrar el valor
             campo.dispatchEvent(new Event('input', {bubbles:true}));
+            campo.dispatchEvent(new Event('change', {bubbles:true}));
+            // Quitar el foco fuerza a Streamlit a confirmar el valor
+            campo.blur();
+
+            // Buscar el botón "Enviar a ROBI" y hacer clic automático tras un breve respiro,
+            // para que ROBI conteste sin que el usuario toque nada más.
+            setTimeout(() => {
+              const botones = doc.querySelectorAll('button');
+              for (const b of botones){
+                if (b.innerText && b.innerText.trim().includes('Enviar a ROBI')){
+                  b.click();
+                  break;
+                }
+              }
+            }, 600);
           } else {
             estado.textContent = "Te escuché, pero escríbelo abajo y pulsa Enviar.";
           }
