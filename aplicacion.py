@@ -8,6 +8,9 @@ Para correr en local sin secrets, también acepta una key escrita en la barra la
 """
 
 import base64
+import json
+import urllib.parse
+import urllib.request
 import streamlit as st
 import streamlit.components.v1 as components
 import anthropic
@@ -57,6 +60,169 @@ def cliente():
     if not key:
         return None
     return anthropic.Anthropic(api_key=key)
+
+
+def obtener_maps_key():
+    """Lee la key de Google Maps desde Secrets o, en local, desde la barra lateral."""
+    try:
+        if "GOOGLE_MAPS_API_KEY" in st.secrets:
+            return st.secrets["GOOGLE_MAPS_API_KEY"]
+    except Exception:
+        pass
+    return st.session_state.get("maps_key_manual", "")
+
+
+# ----------------------------------------------------------------------------
+# GOOGLE MAPS — funciones que llaman a la API real
+# ----------------------------------------------------------------------------
+def _http_get_json(url):
+    """GET sencillo que devuelve JSON (sin dependencias externas)."""
+    with urllib.request.urlopen(url, timeout=10) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def maps_buscar_lugares(consulta, cerca_de=""):
+    """Busca lugares con la Places API (Text Search). Devuelve texto listo para Claude."""
+    key = obtener_maps_key()
+    if not key:
+        return "No hay API key de Google Maps configurada."
+    texto = f"{consulta} {cerca_de}".strip()
+    url = ("https://maps.googleapis.com/maps/api/place/textsearch/json?"
+           + urllib.parse.urlencode({"query": texto, "language": "es", "key": key}))
+    try:
+        data = _http_get_json(url)
+    except Exception as e:
+        return f"Error al consultar Google Maps: {e}"
+    if data.get("status") not in ("OK", "ZERO_RESULTS"):
+        return f"Google Maps respondió: {data.get('status')} {data.get('error_message', '')}"
+    resultados = data.get("results", [])[:5]
+    if not resultados:
+        return "No se encontraron lugares para esa búsqueda."
+    lineas = []
+    for r in resultados:
+        nombre = r.get("name", "Sin nombre")
+        dirn = r.get("formatted_address", "")
+        rating = r.get("rating")
+        abierto = ""
+        oh = r.get("opening_hours", {})
+        if isinstance(oh, dict) and "open_now" in oh:
+            abierto = " · abierto ahora" if oh["open_now"] else " · cerrado ahora"
+        cal = f" · ⭐{rating}" if rating else ""
+        link = ("https://www.google.com/maps/search/?api=1&query="
+                + urllib.parse.quote(f"{nombre} {dirn}"))
+        lineas.append(f"{nombre} — {dirn}{cal}{abierto}\n  Mapa: {link}")
+    return "\n".join(lineas)
+
+
+def maps_como_llegar(origen, destino, modo="driving"):
+    """Calcula la ruta con la Directions API. Devuelve resumen + enlace de Maps."""
+    key = obtener_maps_key()
+    if not key:
+        return "No hay API key de Google Maps configurada."
+    url = ("https://maps.googleapis.com/maps/api/directions/json?"
+           + urllib.parse.urlencode({
+               "origin": origen, "destination": destino,
+               "mode": modo, "language": "es", "key": key}))
+    try:
+        data = _http_get_json(url)
+    except Exception as e:
+        return f"Error al consultar Google Maps: {e}"
+    if data.get("status") != "OK":
+        return f"No se pudo calcular la ruta: {data.get('status')} {data.get('error_message', '')}"
+    leg = data["routes"][0]["legs"][0]
+    distancia = leg["distance"]["text"]
+    duracion = leg["duration"]["text"]
+    nombre_modo = {"driving": "en carro", "walking": "a pie",
+                   "transit": "en transporte público", "bicycling": "en bici"}.get(modo, modo)
+    link = ("https://www.google.com/maps/dir/?api=1&"
+            + urllib.parse.urlencode({"origin": origen, "destination": destino,
+                                      "travelmode": modo}))
+    return (f"Ruta {nombre_modo} de '{leg.get('start_address', origen)}' "
+            f"a '{leg.get('end_address', destino)}': {distancia}, "
+            f"aprox. {duracion}.\nAbrir en Maps: {link}")
+
+
+# Definición de herramientas para el tool use de Claude
+HERRAMIENTAS_MAPS = [
+    {
+        "name": "buscar_lugares",
+        "description": ("Busca lugares reales en Google Maps (restaurantes, cajeros, tiendas, "
+                        "hoteles, atracciones, etc.). Úsala cuando el turista pregunte dónde "
+                        "encontrar algo o qué hay cerca de un sitio."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "consulta": {"type": "string",
+                             "description": "Qué buscar, ej: 'cajeros automáticos', 'restaurantes de comida típica'"},
+                "cerca_de": {"type": "string",
+                             "description": "Lugar o ciudad de referencia, ej: 'Salento, Quindío'"},
+            },
+            "required": ["consulta"],
+        },
+    },
+    {
+        "name": "como_llegar",
+        "description": ("Calcula la ruta y el tiempo entre dos lugares con Google Maps. "
+                        "Úsala cuando el turista pregunte cómo llegar de un sitio a otro."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origen": {"type": "string", "description": "Punto de partida"},
+                "destino": {"type": "string", "description": "Destino"},
+                "modo": {"type": "string", "enum": ["driving", "walking", "transit", "bicycling"],
+                         "description": "Medio de transporte (por defecto driving)"},
+            },
+            "required": ["origen", "destino"],
+        },
+    },
+]
+
+
+def ejecutar_herramienta(nombre, args):
+    """Ejecuta la función de Maps que pidió Claude y devuelve el resultado como texto."""
+    if nombre == "buscar_lugares":
+        return maps_buscar_lugares(args.get("consulta", ""), args.get("cerca_de", ""))
+    if nombre == "como_llegar":
+        return maps_como_llegar(args.get("origen", ""), args.get("destino", ""),
+                                args.get("modo", "driving"))
+    return f"Herramienta desconocida: {nombre}"
+
+
+def conversar_con_maps(cli, system, mensajes, max_tokens):
+    """
+    Llama a Claude con las herramientas de Maps y resuelve el ciclo de tool use:
+    si Claude pide una herramienta, la ejecutamos y le devolvemos el resultado,
+    hasta que entregue su respuesta final en texto.
+    Devuelve (texto_final, mensajes_actualizados).
+    """
+    historial = list(mensajes)
+    usar_tools = bool(obtener_maps_key())  # si no hay key de Maps, responde solo con texto
+    for _ in range(5):  # tope de seguridad para no quedar en bucle
+        kwargs = dict(model=MODELO_TEXTO, max_tokens=max_tokens,
+                      system=system, messages=historial)
+        if usar_tools:
+            kwargs["tools"] = HERRAMIENTAS_MAPS
+        resp = cli.messages.create(**kwargs)
+
+        if resp.stop_reason == "tool_use":
+            # Guardar lo que dijo Claude (incluye los bloques tool_use)
+            historial.append({"role": "assistant", "content": resp.content})
+            resultados = []
+            for bloque in resp.content:
+                if bloque.type == "tool_use":
+                    salida = ejecutar_herramienta(bloque.name, bloque.input)
+                    resultados.append({
+                        "type": "tool_result",
+                        "tool_use_id": bloque.id,
+                        "content": salida,
+                    })
+            historial.append({"role": "user", "content": resultados})
+            continue  # volver a llamar a Claude con los resultados
+
+        # Respuesta final en texto
+        texto = "".join(b.text for b in resp.content if b.type == "text").strip()
+        return texto, historial
+    return "Lo siento, no pude completar la consulta de mapas.", historial
 
 
 # ----------------------------------------------------------------------------
@@ -128,6 +294,20 @@ with st.sidebar:
             help="En Streamlit Cloud usa Settings → Secrets en lugar de esto.",
         )
     st.caption("Para subir a la nube, guarda la key en Secrets como ANTHROPIC_API_KEY.")
+
+    st.divider()
+    st.markdown("### 🗺️ Google Maps")
+    if obtener_maps_key():
+        st.success("Maps conectado")
+    else:
+        st.warning("Sin Maps (búsqueda y rutas desactivadas)")
+        st.text_input(
+            "API key de Google Maps (solo para pruebas locales)",
+            type="password", key="maps_key_manual",
+            help="En Streamlit Cloud usa Settings → Secrets: GOOGLE_MAPS_API_KEY.",
+        )
+    st.caption("En la nube, guárdala en Secrets como GOOGLE_MAPS_API_KEY.")
+
     st.divider()
     if st.session_state.pantalla != "inicio":
         st.button("🏠 Volver al menú", on_click=ir, args=("menu",))
@@ -214,7 +394,7 @@ Catálogo destacado (es una referencia, NO un límite):
 Reglas:
 - Responde en español, cálido y conciso.
 - El catálogo es solo una guía: puedes recomendar otros destinos de Colombia y atender cualquier otra petición de viaje (dónde comprar algo en cierto lugar, comida típica, transporte, alojamiento, clima, presupuesto, artesanías, cajeros, etc.).
-- Si la persona pregunta algo práctico ("¿dónde compro X si estoy en Y?", "¿qué como en Z?"), respóndelo de forma útil y concreta aunque no esté en el catálogo.
+- Si la persona pregunta algo práctico ("¿dónde compro X si estoy en Y?", "¿qué como en Z?", "¿cómo llego de A a B?"), usa las herramientas de Google Maps para darle lugares y rutas reales, e incluye los enlaces de Maps que devuelven para que pueda tocarlos.
 - El perfil del viajero es un punto de partida, no una restricción: si pide algo distinto a sus preferencias iniciales, atiéndelo sin problema.
 - Explica por qué cada destino o sugerencia encaja con lo que pidió.
 - Sugiere 2 o 3 opciones máximo por respuesta.
@@ -235,7 +415,7 @@ def pantalla_chatbot():
         with st.chat_message("user" if m["role"] == "user" else "assistant"):
             st.write(m["content"])
 
-    prompt = st.chat_input("Ej: me gusta la naturaleza y el café, 5 días, presupuesto medio")
+    prompt = st.chat_input("Ej: ¿dónde como bandeja paisa en Salento? o ¿cómo llego de Pereira a Salento?")
     if prompt:
         st.session_state.chat_hist.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -243,11 +423,10 @@ def pantalla_chatbot():
         with st.chat_message("assistant"):
             with st.spinner("Raíces está pensando…"):
                 try:
-                    resp = cli.messages.create(
-                        model=MODELO_TEXTO, max_tokens=900, system=SYSTEM_CHAT + perfil_txt(),
-                        messages=st.session_state.chat_hist,
+                    texto, _ = conversar_con_maps(
+                        cli, SYSTEM_CHAT + perfil_txt(),
+                        st.session_state.chat_hist, max_tokens=900,
                     )
-                    texto = "".join(b.text for b in resp.content if b.type == "text")
                 except Exception as e:
                     texto = f"❌ Error al conectar con la API: {e}"
             st.write(texto)
@@ -262,6 +441,7 @@ SYSTEM_ROBOT = f"""Eres "ROBI", un robot guía de turismo comunitario en Colombi
 Como tu respuesta será leída en voz alta, sé breve y natural: máximo 4 o 5 frases, sin listas, sin asteriscos, sin emojis, sin URLs.
 Recomiendas destinos según los gustos del viajero, priorizando experiencias locales y sostenibles.
 El catálogo es solo una referencia: también puedes recomendar otros lugares y resolver peticiones prácticas (dónde comprar algo en cierto sitio, comida típica, transporte, alojamiento, clima), aunque no estén en el catálogo.
+Tienes herramientas de Google Maps para buscar lugares y calcular cómo llegar; úsalas cuando el turista lo pida. Como tu respuesta se escucha en voz alta, NUNCA leas enlaces ni URLs: resume la dirección, la distancia y el tiempo con palabras (ej: "está a unos 10 minutos en carro").
 El perfil del viajero es un punto de partida, no un límite: atiende cualquier otra petición que haga.
 Catálogo: {", ".join(n for n, _, _ in SITIOS)}.
 Si falta información, haz una sola pregunta corta."""
@@ -302,11 +482,10 @@ def pantalla_robot():
         st.session_state.robot_hist.append({"role": "user", "content": mensaje})
         with st.spinner("ROBI está pensando…"):
             try:
-                resp = cli.messages.create(
-                    model=MODELO_TEXTO, max_tokens=400, system=SYSTEM_ROBOT + perfil_txt(),
-                    messages=st.session_state.robot_hist,
+                salida, _ = conversar_con_maps(
+                    cli, SYSTEM_ROBOT + perfil_txt(),
+                    st.session_state.robot_hist, max_tokens=400,
                 )
-                salida = "".join(b.text for b in resp.content if b.type == "text").strip()
             except Exception as e:
                 salida = f"Hubo un error al conectar: {e}"
         st.session_state.robot_hist.append({"role": "assistant", "content": salida})
