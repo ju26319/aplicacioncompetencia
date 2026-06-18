@@ -14,6 +14,7 @@ import urllib.request
 import streamlit as st
 import streamlit.components.v1 as components
 import anthropic
+from streamlit_mic_recorder import speech_to_text
 
 # ----------------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
@@ -456,15 +457,23 @@ def pantalla_robot():
         st.error("Configura tu API key (barra lateral o Secrets) para usar el robot.")
         return
 
-    st.info("🎙️ Pulsa **Hablar**, di tu pregunta y ROBI te responderá en voz alta. "
-            "Usa Chrome o Edge. Si la voz falla, escribe abajo como respaldo.")
+    st.info("🎙️ Pulsa **🎤 Grabar**, di tu pregunta, vuelve a pulsar para parar, "
+            "y ROBI te responderá en voz alta. Usa Chrome o Edge.")
 
-    # --- Componente de voz en el navegador (reconocimiento + síntesis) ---
-    # Captura la voz, la transcribe y recarga la página con el texto en la URL (?msg=...).
-    componente_voz()
+    # --- Reconocimiento de voz robusto (componente streamlit-mic-recorder) ---
+    # Graba el audio y lo transcribe a texto directamente, sin trucos de iframe.
+    # 'just_once=True' devuelve la transcripción una sola vez (evita reprocesar).
+    texto_voz = speech_to_text(
+        language="es",
+        start_prompt="🎤 Grabar",
+        stop_prompt="⏹️ Detener",
+        just_once=True,
+        use_container_width=True,
+        key="stt_robi",
+    )
 
     # Campo de respaldo / escritura manual
-    texto = st.text_input("Tu mensaje (se llena solo al hablar, o escríbelo):", key="robot_input")
+    texto = st.text_input("O escríbelo aquí:", key="robot_input")
     enviar = st.button("Enviar a ROBI")
 
     # Mostrar historial
@@ -472,13 +481,10 @@ def pantalla_robot():
         with st.chat_message("user" if m["role"] == "user" else "assistant"):
             st.write(m["content"])
 
-    # Determinar el mensaje a enviar: primero por voz (query param ?msg=), luego escrito.
+    # Determinar el mensaje: primero por voz (transcripción), luego escrito.
     mensaje = None
-    msg_voz = st.query_params.get("msg", "")
-    if msg_voz and msg_voz != st.session_state.get("_ultimo_msg_voz", ""):
-        mensaje = msg_voz.strip()
-        st.session_state._ultimo_msg_voz = msg_voz   # evita reprocesar al recargar
-        st.query_params.clear()                       # limpia la URL
+    if texto_voz:
+        mensaje = texto_voz.strip()
     elif enviar and texto.strip():
         mensaje = texto.strip()
 
