@@ -17,7 +17,8 @@ import anthropic
 # ----------------------------------------------------------------------------
 st.set_page_config(page_title="Raíces de Paz IA", page_icon="🌿", layout="centered")
 
-MODELO = "claude-sonnet-4-6"
+MODELO_TEXTO = "claude-haiku-4-5"      # chatbot y robot (texto)
+MODELO_VISION = "claude-sonnet-4-5"    # mapa (análisis de imagen)
 
 # Catálogo de destinos reales de Colombia (compartido por chatbot y robot)
 SITIOS = [
@@ -237,7 +238,7 @@ def pantalla_chatbot():
             with st.spinner("Raíces está pensando…"):
                 try:
                     resp = cli.messages.create(
-                        model=MODELO, max_tokens=900, system=SYSTEM_CHAT + perfil_txt(),
+                        model=MODELO_TEXTO, max_tokens=900, system=SYSTEM_CHAT + perfil_txt(),
                         messages=st.session_state.chat_hist,
                     )
                     texto = "".join(b.text for b in resp.content if b.type == "text")
@@ -245,6 +246,7 @@ def pantalla_chatbot():
                     texto = f"❌ Error al conectar con la API: {e}"
             st.write(texto)
         st.session_state.chat_hist.append({"role": "assistant", "content": texto})
+        st.rerun()
 
 
 # ============================================================================
@@ -273,6 +275,11 @@ def pantalla_robot():
     # Captura la voz, la transcribe con Web Speech, y rellena el campo de texto de Streamlit.
     componente_voz()
 
+    # Limpiar el input de forma segura ANTES de instanciar el widget
+    if st.session_state.get("_limpiar_robot_input"):
+        st.session_state.robot_input = ""
+        st.session_state._limpiar_robot_input = False
+
     # Campo de respaldo / receptor del texto transcrito
     texto = st.text_input("Tu mensaje (se llena solo al hablar, o escríbelo):", key="robot_input")
     enviar = st.button("Enviar a ROBI")
@@ -283,17 +290,20 @@ def pantalla_robot():
             st.write(m["content"])
 
     if enviar and texto.strip():
-        st.session_state.robot_hist.append({"role": "user", "content": texto.strip()})
+        mensaje = texto.strip()
+        st.session_state.robot_hist.append({"role": "user", "content": mensaje})
         with st.spinner("ROBI está pensando…"):
             try:
                 resp = cli.messages.create(
-                    model=MODELO, max_tokens=400, system=SYSTEM_ROBOT + perfil_txt(),
+                    model=MODELO_TEXTO, max_tokens=400, system=SYSTEM_ROBOT + perfil_txt(),
                     messages=st.session_state.robot_hist,
                 )
                 salida = "".join(b.text for b in resp.content if b.type == "text").strip()
             except Exception as e:
                 salida = f"Hubo un error al conectar: {e}"
         st.session_state.robot_hist.append({"role": "assistant", "content": salida})
+        # Marcar para limpiar el campo en el próximo run (evita excepción de Streamlit)
+        st.session_state._limpiar_robot_input = True
         # Hacer que el navegador lea la respuesta en voz alta
         hablar_en_navegador(salida)
         st.rerun()
@@ -342,15 +352,25 @@ def componente_voz():
 
 def hablar_en_navegador(texto):
     """Hace que el navegador lea el texto en voz alta con Web Speech (síntesis)."""
-    seguro = texto.replace("\\", "").replace("`", "'").replace('"', "'").replace("\n", " ")
+    # Escapar para insertarlo dentro de un literal JS con comillas dobles
+    seguro = (texto.replace("\\", "\\\\").replace('"', '\\"')
+              .replace("\n", " ").replace("`", "'"))
     html = f"""
     <script>
-    const u = new SpeechSynthesisUtterance("{seguro}");
-    u.lang = 'es-ES'; u.rate = 1; u.pitch = 1;
-    const voces = window.speechSynthesis.getVoices().filter(v => v.lang.startsWith('es'));
-    if(voces.length) u.voice = voces[0];
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(u);
+    function hablar() {{
+      const u = new SpeechSynthesisUtterance("{seguro}");
+      u.lang = 'es-ES'; u.rate = 1; u.pitch = 1;
+      const voces = window.speechSynthesis.getVoices().filter(v => v.lang.startsWith('es'));
+      if(voces.length) u.voice = voces[0];
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    }}
+    // getVoices() suele venir vacío en la 1a llamada: esperar a que carguen
+    if (window.speechSynthesis.getVoices().length) {{
+      hablar();
+    }} else {{
+      window.speechSynthesis.onvoiceschanged = hablar;
+    }}
     </script>
     """
     components.html(html, height=0)
@@ -390,11 +410,14 @@ def pantalla_mapa():
         if st.button("🔍 Validar misión"):
             datos = archivo.getvalue()
             b64 = base64.standard_b64encode(datos).decode("utf-8")
-            tipo = archivo.type if archivo.type else "image/jpeg"
+            tipo = archivo.type or "image/jpeg"
+            # La API solo acepta jpeg/png/gif/webp; normalizar 'image/jpg'
+            if tipo == "image/jpg":
+                tipo = "image/jpeg"
             with st.spinner("Claude está revisando tu imagen…"):
                 try:
                     resp = cli.messages.create(
-                        model=MODELO, max_tokens=200, system=SYSTEM_VISION,
+                        model=MODELO_VISION, max_tokens=200, system=SYSTEM_VISION,
                         messages=[{
                             "role": "user",
                             "content": [
